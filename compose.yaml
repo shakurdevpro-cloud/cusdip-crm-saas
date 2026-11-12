@@ -1,0 +1,81 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+    container_name: cusdip_app
+    working_dir: /var/www/html
+    volumes:
+      - ./:/var/www/html
+    networks: [cusdip]
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: cusdip_nginx
+    ports:
+      - "${APP_PORT:-8080}:80"
+    volumes:
+      - ./:/var/www/html:ro
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on: [app]
+    networks: [cusdip]
+
+  db:
+    image: mysql:8.0
+    container_name: cusdip_db
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE:-cusdip}
+      MYSQL_USER: ${DB_USERNAME:-cusdip}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-cusdip_local_password}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root_local_password}
+    ports:
+      - "127.0.0.1:${DB_FORWARD_PORT:-3307}:3306"
+    volumes:
+      - cusdip_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p$${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [cusdip]
+
+  redis:
+    image: redis:7-alpine
+    container_name: cusdip_redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - cusdip_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [cusdip]
+
+  queue:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+    container_name: cusdip_queue
+    working_dir: /var/www/html
+    command: ["php", "artisan", "queue:work", "--tries=3", "--timeout=90"]
+    volumes:
+      - ./:/var/www/html
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    profiles: ["workers"]
+    restart: unless-stopped
+    networks: [cusdip]
+
+volumes:
+  cusdip_mysql_data:
+  cusdip_redis_data:
+
+networks:
+  cusdip:
+    driver: bridge
