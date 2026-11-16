@@ -10,6 +10,11 @@ use Illuminate\Support\Str;
 
 class CompanyMembershipService
 {
+
+    public function __construct(
+        protected CompanyRoleService $roleService
+    ) {}
+
     /**
      * Create a company and attach its creator as an active member.
      */
@@ -59,13 +64,15 @@ class CompanyMembershipService
                     ]);
             }
 
-            
             // Attach the creator to the company.
             $lockedUser->companies()->attach($company->id, [
                 'is_default' => ! $hasActiveDefault,
                 'status' => 'active',
                 'joined_at' => now(),
             ]);
+
+            // Create the default roles for the new company.
+            $this->roleService->createDefaultRoles($company);
 
             return $company;
         });

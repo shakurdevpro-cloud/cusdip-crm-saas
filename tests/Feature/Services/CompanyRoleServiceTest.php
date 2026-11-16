@@ -6,13 +6,14 @@ use App\Models\Company;
 use App\Models\User;
 use App\Services\CompanyMembershipService;
 use App\Services\CompanyRoleService;
+use Database\Seeders\PermissionSeeder;
+use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 use Spatie\Permission\Models\Role;
 use Spatie\Permission\PermissionRegistrar;
 use Tests\TestCase;
-use Database\Seeders\PermissionSeeder;
 
 class CompanyRoleServiceTest extends TestCase
 {
@@ -179,18 +180,19 @@ class CompanyRoleServiceTest extends TestCase
 
     public function test_it_rolls_back_role_creation_when_a_permission_is_missing(): void
     {
-        $user = User::factory()->create();
+        // Create a company without automatically creating its default roles.
+        $company = Company::create([
+            'name' => 'Acme',
+            'slug' => 'acme',
+        ]);
 
-        $company = $this->membershipService->createCompanyFor(
-            $user,
-            ['name' => 'Acme']
-        );
-
+        // Remove one required permission.
         DB::table('permissions')
             ->where('name', 'company.settings.update')
             ->where('guard_name', 'web')
             ->delete();
 
+        // The service must throw an exception and roll back role creation.
         $this->expectException(RuntimeException::class);
 
         try {
@@ -201,5 +203,178 @@ class CompanyRoleServiceTest extends TestCase
                 Role::where('company_id', $company->id)->count()
             );
         }
+    }
+
+    public function test_it_assigns_a_role_to_a_user_in_a_company(): void
+    {
+        $user = User::factory()->create();
+
+        $company = $this->membershipService->createCompanyFor(
+            $user,
+            ['name' => 'Acme']
+        );
+
+        $this->roleService->createDefaultRoles($company);
+
+        $role = $this->roleService->syncRoleForUser(
+            $user,
+            $company,
+            'Admin'
+        );
+
+        $this->assertSame('Admin', $role->name);
+        $this->assertSame($company->id, $role->company_id);
+
+        $registrar = app(PermissionRegistrar::class);
+        $registrar->setPermissionsTeamId($company->id);
+
+        try {
+            $user->unsetRelation('roles');
+
+            $this->assertTrue($user->hasRole('Admin'));
+        } finally {
+            $registrar->setPermissionsTeamId(null);
+        }
+    }
+
+    public function test_it_replaces_the_user_role_in_the_same_company(): void
+    {
+        $user = User::factory()->create();
+
+        $company = $this->membershipService->createCompanyFor(
+            $user,
+            ['name' => 'Acme']
+        );
+
+        $this->roleService->createDefaultRoles($company);
+
+        $this->roleService->syncRoleForUser($user, $company, 'Admin');
+
+        $this->roleService->syncRoleForUser($user, $company, 'Sales Agent');
+
+        $registrar = app(PermissionRegistrar::class);
+        $registrar->setPermissionsTeamId($company->id);
+
+        try {
+            $user->unsetRelation('roles');
+
+            $this->assertTrue($user->hasRole('Sales Agent'));
+            $this->assertFalse($user->hasRole('Admin'));
+        } finally {
+            $registrar->setPermissionsTeamId(null);
+        }
+    }
+
+    public function test_it_preserves_user_roles_across_different_companies(): void
+    {
+        $user = User::factory()->create();
+
+        $firstCompany = $this->membershipService->createCompanyFor(
+            $user,
+            ['name' => 'First Company']
+        );
+
+        $secondCompany = $this->membershipService->createCompanyFor(
+            $user,
+            ['name' => 'Second Company']
+        );
+
+        $this->roleService->createDefaultRoles($firstCompany);
+        $this->roleService->createDefaultRoles($secondCompany);
+
+        $this->roleService->syncRoleForUser(
+            $user,
+            $firstCompany,
+            'Admin'
+        );
+
+        $this->roleService->syncRoleForUser(
+            $user,
+            $secondCompany,
+            'Sales Agent'
+        );
+
+        $registrar = app(PermissionRegistrar::class);
+
+        try {
+            // Verify the role in the first company.
+            $registrar->setPermissionsTeamId($firstCompany->id);
+            $user->unsetRelation('roles');
+
+            $this->assertTrue($user->hasRole('Admin'));
+            $this->assertFalse($user->hasRole('Sales Agent'));
+
+            // Verify the role in the second company.
+            $registrar->setPermissionsTeamId($secondCompany->id);
+            $user->unsetRelation('roles');
+
+            $this->assertTrue($user->hasRole('Sales Agent'));
+            $this->assertFalse($user->hasRole('Admin'));
+        } finally {
+            $registrar->setPermissionsTeamId(null);
+        }
+    }
+
+    public function test_it_rejects_role_assignment_without_active_membership(): void
+    {
+        $companyOwner = User::factory()->create();
+        $otherUser = User::factory()->create();
+
+        $company = $this->membershipService->createCompanyFor(
+            $companyOwner,
+            ['name' => 'Acme']
+        );
+
+        $this->roleService->createDefaultRoles($company);
+
+        $this->expectException(AuthorizationException::class);
+
+        $this->roleService->syncRoleForUser(
+            $otherUser,
+            $company,
+            'Admin'
+        );
+    }
+
+    public function test_it_rejects_a_role_that_does_not_belong_to_the_company(): void
+    {
+        $user = User::factory()->create();
+
+        $firstCompany = $this->membershipService->createCompanyFor(
+            $user,
+            ['name' => 'First Company']
+        );
+
+        $secondUser = User::factory()->create();
+
+        $secondCompany = $this->membershipService->createCompanyFor(
+            $secondUser,
+            ['name' => 'Second Company']
+        );
+
+        // Remove the Admin role from the first company.
+        Role::query()
+            ->where('company_id', $firstCompany->id)
+            ->where('name', 'Admin')
+            ->delete();
+
+        // The Admin role still exists, but only for the second company.
+        $this->assertDatabaseHas('roles', [
+            'name' => 'Admin',
+            'company_id' => $secondCompany->id,
+        ]);
+
+        $this->assertDatabaseMissing('roles', [
+            'name' => 'Admin',
+            'company_id' => $firstCompany->id,
+        ]);
+
+        $this->expectException(AuthorizationException::class);
+
+        $this->roleService->syncRoleForUser(
+            $user,
+            $firstCompany,
+            'Admin'
+        );
     }
 }

@@ -15,8 +15,10 @@ class DatabaseSeeder extends Seeder
      */
     public function run(): void
     {
-        // User::factory(10)->create();
+        // Create the application's global permissions.
+        $this->call(PermissionSeeder::class);
 
+        // Create a demonstration user.
         User::factory()->create([
             'name' => 'Test User',
             'email' => 'test@example.com',

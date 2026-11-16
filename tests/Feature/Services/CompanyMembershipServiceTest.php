@@ -9,10 +9,21 @@ use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
+use Database\Seeders\PermissionSeeder;
+use RuntimeException;
+use Spatie\Permission\Models\Role;
+
 
 class CompanyMembershipServiceTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->seed(PermissionSeeder::class);
+    }
 
     public function test_it_creates_a_company_and_attaches_creator_as_default_member(): void
     {
@@ -36,6 +47,20 @@ class CompanyMembershipServiceTest extends TestCase
             'is_default' => true,
             'status' => 'active',
         ]);
+
+        // Verify that the three default roles are created automatically.
+        $this->assertSame(
+            3,
+            Role::where('company_id', $company->id)->count()
+        );
+
+        foreach (['Admin', 'Sales Manager', 'Sales Agent'] as $roleName) {
+            $this->assertDatabaseHas('roles', [
+                'name' => $roleName,
+                'guard_name' => 'web',
+                'company_id' => $company->id,
+            ]);
+        }
     }
 
     public function test_it_does_not_assign_a_second_default_company_to_same_user(): void
@@ -201,4 +226,50 @@ class CompanyMembershipServiceTest extends TestCase
             $company->id
         );
     }
+
+    public function test_it_rolls_back_company_creation_when_default_role_creation_fails(): void
+{
+    $user = User::factory()->create();
+
+    // Remove a permission required by the Admin role.
+    DB::table('permissions')
+        ->where('name', 'company.settings.update')
+        ->where('guard_name', 'web')
+        ->delete();
+
+    $companiesBefore = DB::table('companies')->count();
+    $membershipsBefore = DB::table('company_user')->count();
+
+    try {
+        app(CompanyMembershipService::class)->createCompanyFor(
+            $user,
+            ['name' => 'Rollback Company']
+        );
+
+        $this->fail('An exception should have been thrown.');
+    } catch (RuntimeException $exception) {
+        $this->assertStringContainsString(
+            'Some permissions are missing',
+            $exception->getMessage()
+        );
+    }
+
+    // The company creation must have been rolled back.
+    $this->assertSame(
+        $companiesBefore,
+        DB::table('companies')->count()
+    );
+
+    // The membership creation must also have been rolled back.
+    $this->assertSame(
+        $membershipsBefore,
+        DB::table('company_user')->count()
+    );
+
+    // No role should remain for the failed company creation.
+    $this->assertSame(
+        0,
+        Role::count()
+    );
+}
 }

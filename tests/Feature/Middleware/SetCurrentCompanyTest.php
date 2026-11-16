@@ -10,14 +10,16 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 use Spatie\Permission\PermissionRegistrar;
 use Tests\TestCase;
+use Database\Seeders\PermissionSeeder;
 
 class SetCurrentCompanyTest extends TestCase
 {
     use RefreshDatabase;
-
     protected function setUp(): void
     {
         parent::setUp();
+
+        $this->seed(PermissionSeeder::class);
 
         Route::middleware(['web', 'auth', 'company'])
             ->get('/_test/current-company', function (
